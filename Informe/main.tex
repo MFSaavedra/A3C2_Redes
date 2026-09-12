@@ -1,0 +1,205 @@
+% Template:     Informe LaTeX
+% Documento:    Archivo principal
+% Versión:      8.4.4 (02/12/2025)
+% Codificación: UTF-8
+%
+% Autor: Pablo Pizarro R.
+%        pablo@ppizarror.com
+%
+% Manual template: [https://latex.ppizarror.com/informe]
+% Licencia MIT:    [https://opensource.org/licenses/MIT]
+
+% CREACIÓN DEL DOCUMENTO
+\documentclass[
+	spanish, % Idioma: spanish, english, etc.
+	letterpaper, oneside
+]{article}
+
+% INFORMACIÓN DEL DOCUMENTO
+\def\documenttitle {Actividad 3}
+\def\documentsubtitle {Sockets orientados a conexión con Stop \& Wait}
+\def\documentsubject {TCP}
+
+\def\documentauthor {María Moya G., M. Fernando Saavedra}
+\def\coursename {Redes}
+\def\coursecode {CC4303}
+
+\def\universityname {Universidad de Chile}
+\def\universityfaculty {Facultad de Ciencias Físicas y Matemáticas}
+\def\universitydepartment {Departamento de Ciencias de la Computación}
+\def\universitydepartmentimage {departamentos/dcc}
+\def\universitydepartmentimagecfg {height=1.57cm}
+\def\universitylocation {Santiago de Chile}
+
+% INTEGRANTES, PROFESORES Y FECHAS
+\def\authortable {
+	\begin{tabular}{ll}
+		Integrantes:
+		& \begin{tabular}[t]{l}
+			María Moya G. \\
+			M. Fernando Saavedra
+		\end{tabular} \\
+		Profesor:
+		& \begin{tabular}[t]{l}
+			Ivana Bachmann
+		\end{tabular} \\
+		Auxiliar:
+		& \begin{tabular}[t]{l}
+			Julián Ferreira
+		\end{tabular} \\
+		Ayudantes:
+		& \begin{tabular}[t]{l}
+			Diego García G. \\
+			Valeria Serrano
+		\end{tabular} \\
+		& \\
+		\multicolumn{2}{l}{Fecha de realización: \today} \\
+		% TODO: confirmar la fecha de entrega de la actividad 3
+		\multicolumn{2}{l}{Fecha de entrega: \today} \\
+		\multicolumn{2}{l}{\universitylocation}
+	\end{tabular}
+}
+
+% IMPORTACIÓN DEL TEMPLATE
+\input{template}
+
+% CONVENCIÓN TIPOGRÁFICA
+% El cuerpo del informe se compone en una sola fuente: no se usa monoespaciado,
+% negrita ni cursiva para destacar nombres de archivo, funciones, comandos ni
+% vocabulario del protocolo. La tipografía solo cambia dentro de los bloques
+% verbatim, que reproducen salidas literales de las pruebas y del modo debug.
+% Las tres macros se conservan como marcas semánticas y no producen ningún
+% cambio visual.
+\newcommand{\code}[1]{#1}     % identificadores, funciones, archivos, comandos (SocketTCP, send, cliente.py)
+\newcommand{\flag}[1]{#1}     % flags del header (SYN, ACK, FIN)
+\newcommand{\field}[1]{#1}    % campos del header y variables del protocolo (seq, message_length, buff_size)
+
+% INICIO DE PÁGINAS
+\begin{document}
+
+% PORTADA
+\templatePortrait
+
+% CONFIGURACIÓN DE PÁGINA Y ENCABEZADOS
+\templatePagecfg
+
+% RESUMEN O ABSTRACT
+%\begin{abstractd}
+%	\lipsum[1] % Párrafo ejemplo, se puede borrar
+%\end{abstractd}
+
+% TABLA DE CONTENIDOS - ÍNDICE
+\templateIndex
+
+% CONFIGURACIONES FINALES
+\templateFinalcfg
+
+% ======================= INICIO DEL DOCUMENTO =======================
+
+\section{Diseño de SocketTCP}
+% TODO: qué guarda el constructor (socket UDP, dirección de destino, número de
+% secuencia, bytes pendientes de recv, timeout) y por qué no recibe parámetros.
+
+\subsection{Formato del segmento}
+% TODO (paso 3): cómo se codifican en bytes SYN, ACK, FIN y seq; tamaño fijo del
+% header; tamaño del buffer del socket UDP (header + 16); parse_segment y
+% create_segment.
+
+\subsection{3-way handshake}
+% TODO (paso 4): bind, connect y accept; número de secuencia inicial aleatorio
+% en [0, 100]; por qué accept retorna un socket nuevo en una dirección distinta.
+
+% TODO: diagrama del 3-way handshake con los pasos asociados a connect y accept
+% (obligatorio en el informe). Sugerencia: generarlo desde un .dot en img/.
+%\begin{figure}[ht]
+%	\centering
+%	\includegraphics[width=0.7\textwidth]{img/handshake.pdf}
+%	\caption{3-way handshake y su correspondencia con \code{connect} y \code{accept}.}
+%	\label{fig:handshake}
+%\end{figure}
+
+\subsection{Stop \& Wait: send y recv}
+% TODO (paso 5): timeout fijo elegido y por qué; settimeout y manejo del error;
+% primer segmento con message_length; división en trozos de 16 bytes; seq
+% inicial = último seq almacenado.
+%
+% TODO: decisiones de diseño de recv (el enunciado las pide explícitamente):
+%  - cómo se sabe si recv está empezando un mensaje o continuando uno
+%    (variable de bytes pendientes en el constructor u otra forma);
+%  - condición de retorno: len(recibido) >= min(message_length, buff_size);
+%  - qué se hace con el excedente cuando len(recibido) - buff_size > 0
+%    (retornar a lo más buff_size bytes sin perder datos);
+%  - buff_size afecta solo a SocketTCP, no al buffer del socket UDP.
+
+\subsection{Cierre de conexión}
+% TODO (pasos 6 y 8): close (Host A) y recv_close (Host B); reintento del FIN
+% hasta 3 timeouts; reenvío del último ACK tres veces con un timeout entre cada
+% envío; qué pasa cuando recv recibe un FIN.
+
+\subsection{Manejo de pérdidas en el handshake}
+% TODO (paso 7): Stop & Wait en connect y accept; caso borde en que se pierde el
+% último ACK del handshake y cómo se resolvió (qué funciones hubo que modificar).
+
+% TODO: diagrama del caso borde (obligatorio en el informe).
+%\begin{figure}[ht]
+%	\centering
+%	\includegraphics[width=0.7\textwidth]{img/handshake_ack_perdido.pdf}
+%	\caption{Pérdida del último \flag{ACK} del handshake y su resolución.}
+%	\label{fig:handshake-ack-perdido}
+%\end{figure}
+
+\subsection{Modo debug}
+% TODO: cómo se activa; qué imprime cuando hay pérdida y cómo la maneja
+% (timeouts, retransmisiones, segmentos duplicados descartados).
+
+\section{Pruebas}
+% TODO: entorno (VM o localhost, versión de Python), y si las pérdidas se
+% indujeron con netem o a mano. Si es a mano, indicar cómo se controla la tasa
+% de pérdida y que aplica en ambas direcciones.
+
+\subsection{Handshake}
+% TODO: salida de la prueba del paso 4.
+
+\subsection{send y recv}
+% TODO: Tests 1, 2 y 3 del apartado "Test send y recv" del enunciado, sin
+% pérdidas.
+
+\subsection{Cierre de conexión}
+% TODO: prueba del paso 6, sin pérdidas.
+
+\subsection{Pruebas con pérdidas}
+% TODO: envío de un archivo de más de 16 bytes con netem loss + delay
+% (ej: sudo tc qdisc add dev lo root netem loss 20.0% delay 0.5s), con la
+% salida del modo debug mostrando las retransmisiones; verificar que el cierre
+% siempre se logra desde el lado que llama a close.
+
+\subsection{recv con buff\_size menor que message\_length}
+% TODO: archivo de 2n bytes recibido con dos llamadas a recv(n), con n no
+% múltiplo de 16.
+
+\section{Situaciones de borde no especificadas}
+% TODO: cualquier caso no cubierto por el enunciado y la decisión tomada
+% (el enunciado pide indicarlos explícitamente).
+
+\section{Ejecución y repositorio}
+% TODO: cómo se ejecutan servidor y cliente, y cómo se activa el modo debug.
+
+\begin{verbatim}
+python3 servidor.py localhost 8000
+python3 cliente.py localhost 8000 < archivo.txt
+\end{verbatim}
+
+El código está en \url{https://github.com/MFSaavedra/A3C2_Redes}.
+
+\section{Declaración de uso de IA}
+% TODO: obligatoria; sin ella no se considera el puntaje del informe. Indicar el
+% modelo y dónde se usó (código, redacción, pruebas, diagramas).
+En la elaboración de este informe se utilizaron modelos de inteligencia artificial. Se utilizaron Gemini y Claude (Opus 5).
+
+Su uso se resume a:
+\begin{itemize}
+	\item % TODO
+\end{itemize}
+
+% FIN DEL DOCUMENTO
+\end{document}
