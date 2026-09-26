@@ -16,7 +16,6 @@ class SocketTCP:
         self.remote_address = None
         self.local_address = None
         self.seq_num = 0
-        self.ack_num = 0
         self.is_connected = False
         self.is_bound = False
         self.timeout = 1
@@ -49,9 +48,49 @@ class SocketTCP:
     def connect(self, address):
         self.remote_address = address
         self.seq_num = random.randint(0, 100)
+        self.socket.settimeout(self.timeout)
+        syn_segment = self.create_segment({"SYN": True, "seq": self.seq_num})
+
+        while not self.is_connected:
+            try:
+                self.socket.sendto(syn_segment, self.remote_address)
+                data, addr = self.socket.recvfrom(BUFFER_SIZE)
+                parsed = self.parse_segment(data)
+
+                if parsed and parsed["SYN"] and parsed["ACK"]:
+                    self.seq_num += 1
+                    ack_segment = self.create_segment({"ACK": True, "seq": self.seq_num})
+                    self.socket.sendto(ack_segment, self.remote_address)
+                    self.is_connected = True
+            except socket.timeout:
+                continue
 
     def accept(self):
-        raise NotImplementedError  # paso 4
+        while True:
+            data, addr = self.socket.recvfrom(BUFFER_SIZE)
+            parsed = self.parse_segment(data)
+
+            if parsed and parsed["SYN"]:
+                new_socket = SocketTCP()
+                new_socket.bind((self.local_address[0], 0))
+                new_socket.remote_address = addr
+                new_socket.seq_num = random.randint(0, 100)
+                new_socket.socket.settimeout(self.timeout)
+
+                syn_ack = new_socket.create_segment({"SYN": True, "ACK": True, "seq": new_socket.seq_num})
+
+                while True:
+                    try:
+                        new_socket.socket.sendto(syn_ack, addr)
+                        data, addr = new_socket.socket.recvfrom(BUFFER_SIZE)
+                        parsed = new_socket.parse_segment(data)
+
+                        if parsed and parsed["ACK"]:
+                            new_socket.seq_num += 1
+                            new_socket.is_connected = True
+                            return new_socket, new_socket.local_address
+                    except socket.timeout:
+                        continue
 
     def send(self, message):
         raise NotImplementedError  # paso 5
