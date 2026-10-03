@@ -44,55 +44,56 @@ class SocketTCP:
 
     def bind(self, address):
         self.socket.bind(address)
-        self.local_address = address
+        self.local_address = self.socket.getsockname()  # dirección real: con puerto 0 el SO elige uno
         self.is_bound = True
 
+    # Handshake con un solo contador: SYN lleva x, SYN+ACK x+1 y ACK x+2; ambos lados guardan x+2
     def connect(self, address):
         self.remote_address = address
         self.seq_num = random.randint(0, 100)
         self.socket.settimeout(self.timeout)
         syn_segment = self.create_segment({"SYN": True, "seq": self.seq_num})
+        self.socket.sendto(syn_segment, self.remote_address)
 
         while not self.is_connected:
             try:
-                self.socket.sendto(syn_segment, self.remote_address)
                 data, addr = self.socket.recvfrom(BUFFER_SIZE)
                 parsed = self.parse_segment(data)
 
-                if parsed and parsed["SYN"] and parsed["ACK"] and parsed["seq"] == self.seq_num + 1:
-                    self.remote_address = addr
+                if parsed["SYN"] and parsed["ACK"] and parsed["seq"] == self.seq_num + 1:
+                    self.remote_address = addr  # el SYN+ACK viene del socket nuevo que creó accept
                     self.seq_num += 2
                     ack_segment = self.create_segment({"ACK": True, "seq": self.seq_num})
                     self.socket.sendto(ack_segment, self.remote_address)
                     self.is_connected = True
             except socket.timeout:
-                continue
+                self.socket.sendto(syn_segment, self.remote_address)
 
     def accept(self):
         while True:
             data, addr = self.socket.recvfrom(BUFFER_SIZE)
             parsed = self.parse_segment(data)
 
-            if parsed and parsed["SYN"]:
+            if parsed["SYN"]:
                 new_socket = SocketTCP()
                 new_socket.bind((self.local_address[0], 0))
                 new_socket.remote_address = addr
-                new_socket.socket.settimeout(self.timeout)
                 new_socket.seq_num = parsed["seq"] + 1
+                new_socket.socket.settimeout(self.timeout)
                 syn_ack = new_socket.create_segment({"SYN": True, "ACK": True, "seq": new_socket.seq_num})
+                new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
                 while True:
                     try:
-                        new_socket.socket.sendto(syn_ack, addr)
-                        data, addr = new_socket.socket.recvfrom(BUFFER_SIZE)
+                        data, _ = new_socket.socket.recvfrom(BUFFER_SIZE)
                         parsed = new_socket.parse_segment(data)
 
-                        if parsed and parsed["ACK"] and parsed["seq"] == new_socket.seq_num + 1:
+                        if parsed["ACK"] and parsed["seq"] == new_socket.seq_num + 1:
                             new_socket.seq_num += 1
                             new_socket.is_connected = True
                             return new_socket, new_socket.local_address
                     except socket.timeout:
-                        continue
+                        new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
     def send(self, message):
         self.socket.settimeout(self.timeout)
