@@ -21,6 +21,7 @@ class SocketTCP:
         self.timeout = 1
         self.remaining_bytes = 0
         self.pending_buffer = b""
+        self.expected_seq = 0
 
     @staticmethod
     def parse_segment(segment: bytes) -> dict:
@@ -157,8 +158,8 @@ class SocketTCP:
                     if parsed and not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"]:
                         message_length = int.from_bytes(parsed["payload"], "big")
                         self.remaining_bytes = message_length
-                        expected_seq = parsed["seq"] + len(parsed["payload"])
-                        ack_segment = self.create_segment({"ACK": True, "seq": expected_seq})
+                        self.expected_seq = parsed["seq"] + len(parsed["payload"])
+                        ack_segment = self.create_segment({"ACK": True, "seq": self.expected_seq})
                         self.socket.sendto(ack_segment, addr)
                         break
                 except socket.timeout:
@@ -173,15 +174,15 @@ class SocketTCP:
 
                 if parsed and not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"]:
                     payload = parsed["payload"]
-                    if parsed["seq"] == expected_seq:
+                    if parsed["seq"] == self.expected_seq:
                         received_data += payload
                         bytes_collected += len(payload)
                         self.remaining_bytes -= len(payload)
-                        expected_seq += len(payload)
-                        ack_segment = self.create_segment({"ACK": True, "seq": expected_seq})
+                        self.expected_seq += len(payload)
+                        ack_segment = self.create_segment({"ACK": True, "seq": self.expected_seq})
                         self.socket.sendto(ack_segment, addr)
-                    elif parsed["seq"] < expected_seq:
-                        ack_segment = self.create_segment({"ACK": True, "seq": expected_seq})
+                    elif parsed["seq"] < self.expected_seq:
+                        ack_segment = self.create_segment({"ACK": True, "seq": self.expected_seq})
                         self.socket.sendto(ack_segment, addr)
 
             except socket.timeout:
