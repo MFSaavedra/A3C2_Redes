@@ -89,8 +89,10 @@ class SocketTCP:
                         data, _ = new_socket.socket.recvfrom(BUFFER_SIZE)
                         parsed = new_socket.parse_segment(data)
 
-                        if parsed["ACK"] and parsed["seq"] == new_socket.seq_num + 1:
+                        # el ACK final, o el primer segmento de send si ese ACK se perdió
+                        if not parsed["SYN"] and parsed["seq"] == new_socket.seq_num + 1:
                             new_socket.seq_num += 1
+                            new_socket.expected_seq = new_socket.seq_num
                             new_socket.is_connected = True
                             return new_socket, new_socket.local_address
                     except socket.timeout:
@@ -148,6 +150,8 @@ class SocketTCP:
             else:
                 received_data += self.pending_buffer
                 self.pending_buffer = b""
+                if self.remaining_bytes == 0:
+                    return received_data
 
         if self.remaining_bytes == 0:
             while True:
@@ -156,6 +160,10 @@ class SocketTCP:
                     parsed = self.parse_segment(data)
 
                     if parsed and not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"]:
+                        if parsed["seq"] != self.expected_seq:
+                            if parsed["seq"] < self.expected_seq:  # duplicado: su ACK se perdió
+                                self.socket.sendto(self.create_segment({"ACK": True, "seq": self.expected_seq}), addr)
+                            continue
                         message_length = int.from_bytes(parsed["payload"], "big")
                         self.remaining_bytes = message_length
                         self.expected_seq = parsed["seq"] + len(parsed["payload"])
@@ -190,7 +198,6 @@ class SocketTCP:
 
         if len(received_data) > buff_size:
             self.pending_buffer = received_data[buff_size:]
-            self.remaining_bytes += len(self.pending_buffer)
             return received_data[:buff_size]
 
         return received_data
