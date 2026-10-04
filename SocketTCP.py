@@ -1,5 +1,6 @@
 import socket
 import random
+import time
 
 # Formato del segmento: [flags: 1 byte][seq: 4 bytes, big-endian][datos: 0 a 16 bytes]
 ACK_BIT = 0x01
@@ -18,7 +19,7 @@ class SocketTCP:
         self.seq_num = 0
         self.is_connected = False
         self.is_bound = False
-        self.timeout = 1
+        self.timeout = 2  # segundos: debe superar el RTT, que con netem delay 0.5s en lo es ~1 s
         self.remaining_bytes = 0
         self.pending_buffer = b""
         self.expected_seq = 0
@@ -99,44 +100,37 @@ class SocketTCP:
                         new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
     def send(self, message):
-        self.socket.settimeout(self.timeout)
         message_length = len(message)
         len_payload = message_length.to_bytes(4, "big")
         len_segment = self.create_segment({"seq": self.seq_num, "payload": len_payload})
-
-        expected_ack = self.seq_num + len(len_payload)
-        ack_received = False
-        while not ack_received:
-            try:
-                self.socket.sendto(len_segment, self.remote_address)
-                data, addr = self.socket.recvfrom(BUFFER_SIZE)
-                parsed = self.parse_segment(data)
-
-                if parsed and parsed["ACK"] and parsed["seq"] == expected_ack:
-                    ack_received = True
-                    self.seq_num = expected_ack
-            except socket.timeout:
-                continue
+        self._send_and_wait(len_segment, self.seq_num + len(len_payload))
 
         offset = 0
         while offset < message_length:
             chunk = message[offset:offset + MAX_PAYLOAD]
             segment = self.create_segment({"seq": self.seq_num, "payload": chunk})
-            expected_ack = self.seq_num + len(chunk)
-            ack_received = False
+            self._send_and_wait(segment, self.seq_num + len(chunk))
+            offset += len(chunk)
 
-            while not ack_received:
+    # Stop & Wait de un segmento: si el segmento o su ACK se pierden, el ACK esperado no llega, vence
+    # el timeout y se reenvía. Lo que llegue mientras tanto y no sea ese ACK (un ACK repetido, un
+    # SYN+ACK reenviado) se ignora: no provoca un reenvío ni reinicia el plazo
+    def _send_and_wait(self, segment, expected_ack):
+        while True:
+            self.socket.sendto(segment, self.remote_address)
+            deadline = time.monotonic() + self.timeout
+            remaining = self.timeout
+            while remaining > 0:
+                self.socket.settimeout(remaining)
                 try:
-                    self.socket.sendto(segment, self.remote_address)
-                    data, addr = self.socket.recvfrom(BUFFER_SIZE)
-                    parsed = self.parse_segment(data)
-
-                    if parsed and parsed["ACK"] and parsed["seq"] == expected_ack:
-                        ack_received = True
-                        self.seq_num = expected_ack
-                        offset += len(chunk)
+                    data, _ = self.socket.recvfrom(BUFFER_SIZE)
                 except socket.timeout:
-                    continue
+                    break
+                parsed = self.parse_segment(data)
+                if parsed["ACK"] and parsed["seq"] == expected_ack:
+                    self.seq_num = expected_ack
+                    return
+                remaining = deadline - time.monotonic()
 
     def recv(self, buff_size):
         self.socket.settimeout(self.timeout)
