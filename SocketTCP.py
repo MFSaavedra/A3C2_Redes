@@ -90,12 +90,26 @@ class SocketTCP:
                         data, _ = new_socket.socket.recvfrom(BUFFER_SIZE)
                         parsed = new_socket.parse_segment(data)
 
-                        # el ACK final, o el primer segmento de send si ese ACK se perdió
-                        if not parsed["SYN"] and parsed["seq"] == new_socket.seq_num + 1:
+                        # Caso normal: llegó el ACK final del handshake
+                        if (parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"] and parsed["seq"] == new_socket.seq_num + 1):
                             new_socket.seq_num += 1
                             new_socket.expected_seq = new_socket.seq_num
                             new_socket.is_connected = True
                             return new_socket, new_socket.local_address
+
+                        # Caso borde: se perdió el ACK final y llegó el primer segmento de datos
+                        if (not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"] and
+                            parsed["seq"] == new_socket.seq_num + 1 and len(parsed["payload"]) == 4):
+                            message_length = int.from_bytes(parsed["payload"], "big") # este segmento contiene el largo del mensaje
+                            new_socket.remaining_bytes = message_length
+                            new_socket.expected_seq = parsed["seq"] + len(parsed["payload"])
+                            new_socket.seq_num = new_socket.expected_seq
+                            ack_segment = new_socket.create_segment({"ACK": True, "seq": new_socket.expected_seq})
+                            new_socket.socket.sendto(ack_segment, new_socket.remote_address)
+                            new_socket.is_connected = True
+
+                            return new_socket, new_socket.local_address
+                    
                     except socket.timeout:
                         new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
