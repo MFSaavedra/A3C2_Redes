@@ -90,8 +90,9 @@ class SocketTCP:
                         data, _ = new_socket.socket.recvfrom(BUFFER_SIZE)
                         parsed = new_socket.parse_segment(data)
 
-                        # Caso normal: llegó el ACK final del handshake
-                        if (parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"] and parsed["seq"] == new_socket.seq_num + 1):
+                        # Caso normal: llegó el ACK final del handshake. También sirve el FIN de un cliente que
+                        # cerró sin enviar datos tras perderse ese ACK: close lo reenvía y lo recibe recv_close
+                        if ((parsed["ACK"] or parsed["FIN"]) and not parsed["SYN"] and parsed["seq"] == new_socket.seq_num + 1):
                             new_socket.seq_num += 1
                             new_socket.expected_seq = new_socket.seq_num
                             new_socket.is_connected = True
