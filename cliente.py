@@ -1,26 +1,19 @@
-import socket
+import sys
 import SocketTCP
 
-print('Creando socket - Cliente UDP')
- 
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-address = ('localhost', 8000)
-file_path = input("Ingrese la ruta del archivo a enviar: ")
+# Uso: python3 cliente.py <host> <puerto> < archivo
+# Envía todo lo que llega por la entrada estándar como un solo mensaje y luego cierra la conexión.
+# Los mensajes de estado van a stderr
 
-try:
-    with open(file_path, 'rb') as file:
-        file_data = file.read()
-    chunk_size = SocketTCP.MAX_PAYLOAD
-    print(f"... Mandando el archivo: {file_path}")
-    for i in range(0, len(file_data), chunk_size):
-        chunk = file_data[i:i+chunk_size]
-        # seq provisorio: posición del trozo en el archivo (la regla real se define en los pasos 4 y 5)
-        segment = SocketTCP.SocketTCP.create_segment({"seq": i, "payload": chunk})
-        client_socket.sendto(segment, address)
+if len(sys.argv) != 3:
+    sys.exit("Uso: python3 cliente.py <host> <puerto> < archivo")
 
-    print("... Archivo enviado")
+address = (sys.argv[1], int(sys.argv[2]))
+file_data = sys.stdin.buffer.read()  # bytes crudos: el archivo no tiene por qué ser texto
 
-except Exception as e:
-    print(f"Error al enviar el archivo: {e}")
-finally:
-    client_socket.close()
+client_socketTCP = SocketTCP.SocketTCP()
+client_socketTCP.connect(address)
+print(f"Conectado a {address[0]}:{address[1]}, enviando {len(file_data)} bytes", file=sys.stderr)
+client_socketTCP.send(file_data)
+client_socketTCP.close()
+print("Archivo enviado y conexión cerrada", file=sys.stderr)

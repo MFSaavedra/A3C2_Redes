@@ -23,6 +23,7 @@ class SocketTCP:
         self.remaining_bytes = 0
         self.pending_buffer = b""
         self.expected_seq = 0
+        self.fin_seq = None  # seq del FIN de la contraparte si llegó antes de recv_close (a recv o accept)
 
     @staticmethod
     def parse_segment(segment: bytes) -> dict:
@@ -90,12 +91,29 @@ class SocketTCP:
                         data, _ = new_socket.socket.recvfrom(BUFFER_SIZE)
                         parsed = new_socket.parse_segment(data)
 
-                        # el ACK final, o el primer segmento de send si ese ACK se perdió
-                        if not parsed["SYN"] and parsed["seq"] == new_socket.seq_num + 1:
+                        # Caso normal: llegó el ACK final del handshake. También sirve el FIN de un cliente que
+                        # cerró sin enviar datos tras perderse ese ACK; queda guardado para recv y recv_close
+                        if ((parsed["ACK"] or parsed["FIN"]) and not parsed["SYN"] and parsed["seq"] == new_socket.seq_num + 1):
                             new_socket.seq_num += 1
                             new_socket.expected_seq = new_socket.seq_num
                             new_socket.is_connected = True
+                            if parsed["FIN"]:
+                                new_socket.fin_seq = parsed["seq"]
                             return new_socket, new_socket.local_address
+
+                        # Caso borde: se perdió el ACK final y llegó el primer segmento de datos
+                        if (not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"] and
+                            parsed["seq"] == new_socket.seq_num + 1 and len(parsed["payload"]) == 4):
+                            message_length = int.from_bytes(parsed["payload"], "big") # este segmento contiene el largo del mensaje
+                            new_socket.remaining_bytes = message_length
+                            new_socket.expected_seq = parsed["seq"] + len(parsed["payload"])
+                            new_socket.seq_num = new_socket.expected_seq
+                            ack_segment = new_socket.create_segment({"ACK": True, "seq": new_socket.expected_seq})
+                            new_socket.socket.sendto(ack_segment, new_socket.remote_address)
+                            new_socket.is_connected = True
+
+                            return new_socket, new_socket.local_address
+                    
                     except socket.timeout:
                         new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
@@ -114,8 +132,10 @@ class SocketTCP:
 
     # Stop & Wait de un segmento: si el segmento o su ACK se pierden, el ACK esperado no llega, vence
     # el timeout y se reenvía. Lo que llegue mientras tanto y no sea ese ACK (un ACK repetido, un
-    # SYN+ACK reenviado) se ignora: no provoca un reenvío ni reinicia el plazo
-    def _send_and_wait(self, segment, expected_ack):
+    # SYN+ACK reenviado) se ignora: no provoca un reenvío ni reinicia el plazo. Sin max_timeouts
+    # reintenta para siempre; con él se rinde tras esa cantidad de timeouts. Retorna si llegó el ACK
+    def _send_and_wait(self, segment, expected_ack, max_timeouts=None):
+        timeouts = 0
         while True:
             self.socket.sendto(segment, self.remote_address)
             deadline = time.monotonic() + self.timeout
@@ -129,8 +149,11 @@ class SocketTCP:
                 parsed = self.parse_segment(data)
                 if parsed["ACK"] and parsed["seq"] == expected_ack:
                     self.seq_num = expected_ack
-                    return
+                    return True
                 remaining = deadline - time.monotonic()
+            timeouts += 1
+            if max_timeouts is not None and timeouts == max_timeouts:
+                return False
 
     def recv(self, buff_size):
         self.socket.settimeout(self.timeout)
@@ -148,11 +171,20 @@ class SocketTCP:
                     return received_data
 
         if self.remaining_bytes == 0:
+            # la contraparte ya cerró y no quedan datos: fin del flujo, como el b"" de un socket TCP
+            if self.fin_seq is not None:
+                return b""
             while True:
                 try:
                     data, addr = self.socket.recvfrom(BUFFER_SIZE)
                     parsed = self.parse_segment(data)
 
+                    # el FIN solo puede llegar entre mensajes, porque el send del otro lado no termina hasta
+                    # que se confirman todos sus datos. Se guarda para que recv_close lo responda sin
+                    # esperar un reenvío
+                    if parsed["FIN"] and not parsed["ACK"]:
+                        self.fin_seq = parsed["seq"]
+                        return b""
                     if parsed and not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"]:
                         if parsed["seq"] != self.expected_seq:
                             if parsed["seq"] < self.expected_seq:  # duplicado: su ACK se perdió
@@ -197,33 +229,43 @@ class SocketTCP:
         return received_data
     
     # Cierre con el mismo contador que el handshake: FIN lleva s (el seq tras el último send, que es
-    # el expected_seq del otro lado), FIN+ACK s+1 y ACK s+2. close es el Host A y recv_close el Host B
+    # el expected_seq del otro lado), FIN+ACK s+1 y ACK s+2. close es el Host A y recv_close el Host B.
+    # Ninguno espera para siempre: tras 3 timeouts sin respuesta asumen que la contraparte ya cerró
     def close(self):
         if self.is_connected:
             fin = self.create_segment({"FIN": True, "seq": self.seq_num})
-            self._send_and_wait(fin, self.seq_num + 1)  # el FIN+ACK es el único segmento con ACK y seq s+1
-            self.seq_num += 1
-            self.socket.sendto(self.create_segment({"ACK": True, "seq": self.seq_num}), self.remote_address)
+            # el FIN+ACK es el único segmento con ACK y seq s+1; el FIN se reenvía tras cada timeout
+            if self._send_and_wait(fin, self.seq_num + 1, max_timeouts=3):
+                self.seq_num += 1
+                ack = self.create_segment({"ACK": True, "seq": self.seq_num})
+                # nadie confirma el ACK final, así que va 3 veces, a un timeout de distancia, para que
+                # llegue aunque se pierdan copias
+                for i in range(3):
+                    if i > 0:
+                        time.sleep(self.timeout)
+                    self.socket.sendto(ack, self.remote_address)
             self.is_connected = False
         self.socket.close()
 
     def recv_close(self):
         self.socket.settimeout(self.timeout)
-        while True:
+        # espera el FIN, salvo que ya haya llegado a recv o a accept
+        while self.fin_seq is None:
             try:
                 data, addr = self.socket.recvfrom(BUFFER_SIZE)
             except socket.timeout:
                 continue
             parsed = self.parse_segment(data)
             if parsed["FIN"] and not parsed["ACK"]:
-                break
+                self.fin_seq = parsed["seq"]
             # dato repetido: si el ACK del último segmento se perdió, el send del otro lado lo sigue
             # reenviando y nunca llega a close
-            if not (parsed["ACK"] or parsed["SYN"]) and parsed["seq"] < self.expected_seq:
+            elif not (parsed["ACK"] or parsed["SYN"]) and parsed["seq"] < self.expected_seq:
                 self.socket.sendto(self.create_segment({"ACK": True, "seq": self.expected_seq}), addr)
 
-        self.seq_num = parsed["seq"] + 1
+        self.seq_num = self.fin_seq + 1
         fin_ack = self.create_segment({"FIN": True, "ACK": True, "seq": self.seq_num})
-        self._send_and_wait(fin_ack, self.seq_num + 1)  # espera el ACK final, con seq s+2
+        # espera el ACK final (seq s+2) hasta 3 timeouts, reenviando el FIN+ACK tras cada uno
+        self._send_and_wait(fin_ack, self.seq_num + 1, max_timeouts=3)
         self.is_connected = False
         self.socket.close()
