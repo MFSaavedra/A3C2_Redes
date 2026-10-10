@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 venv/
 
+# Salidas de las pruebas (pruebas/sin_perdidas.sh y pruebas/perdidas.sh)
+pruebas/salida/
+
 # LaTeX - archivos de compilación del informe
 *.aux
 *.bbl
