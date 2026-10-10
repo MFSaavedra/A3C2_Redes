@@ -140,13 +140,13 @@
 % TODO (paso 7): Stop & Wait en connect y accept; caso borde en que se pierde el
 % último ACK del handshake y cómo se resolvió (qué funciones hubo que modificar).
 
-% TODO: diagrama del caso borde (obligatorio en el informe).
-%\begin{figure}[ht]
-%	\centering
-%	\includegraphics[width=0.7\textwidth]{img/handshake_ack_perdido.pdf}
-%	\caption{Pérdida del último \flag{ACK} del handshake y su resolución.}
-%	\label{fig:handshake-ack-perdido}
-%\end{figure}
+% Fuente en img/handshake_ack_perdido.dot; el PDF se regenera con img/render.sh.
+\begin{figure}[htbp]
+	\centering
+	\includegraphics[width=\textwidth]{img/handshake_ack_perdido.pdf}
+	\caption{Pérdida del último \flag{ACK} del handshake y su resolución.}
+	\label{fig:handshake-ack-perdido}
+\end{figure}
 
 \subsection{Modo debug}
 % TODO: cómo se activa; qué imprime cuando hay pérdida y cómo la maneja

@@ -1,0 +1,84 @@
+// Caso borde del paso 7: se pierde el último ACK del handshake y accept toma el primer segmento
+// de send como confirmación. Mismo estilo que handshake.dot; se genera con ./render.sh
+digraph handshake_ack_perdido {
+    graph [splines=false, margin=0, pad=0.03]
+    node  [shape=plaintext, fontname="LM Roman 10,", fontsize=11, fontcolor="#212121",
+           margin=0, width=0, height=0]
+    edge  [arrowsize=0.7, penwidth=1.1]
+
+    // Líneas de vida en x = 126 (C), 254 (L) y 338 (N), como en handshake.dot. Lo que hacen
+    // connect y send va a la izquierda de C y lo que hace accept a la derecha de N.
+
+    // ---- sockets y líneas de vida
+    cliente  [label="Cliente", fontsize=13, pos="126,0"]
+    servidor [label="Servidor", fontsize=13, pos="296,0"]
+    C [shape=box, margin="0.06,0.03", label="socket del cliente (C)\npuerto efímero", pos="126,-32"]
+    L [shape=box, margin="0.06,0.03", label="socket de escucha (L)\nbind(address)", pos="254,-32"]
+    N [shape=box, margin="0.06,0.03", label="socket nuevo (N)", pos="338,-152"]
+
+    {
+        node [shape=point, width=0.01, style=invis]
+        c_fin [pos="126,-572"]  l_fin [pos="254,-572"]  n_fin [pos="338,-572"]
+        c1 [pos="126,-112"]  l1 [pos="254,-130"]   // SYN
+        l2 [pos="254,-152"]                         // accept crea N
+        n1 [pos="338,-198"]  c2 [pos="126,-216"]   // SYN+ACK
+        c3 [pos="126,-258"]  x1 [pos="214,-266.3"] // ACK perdido
+        c4 [pos="126,-336"]  n4 [pos="338,-358"]   // primer segmento de send
+        n5 [pos="338,-478"]  c5 [pos="126,-496"]   // ACK del largo
+        c6 [pos="126,-552"]  n6 [pos="338,-552"]   // datos
+        k1 [pos="3,-96"]     k2 [pos="3,-268"]     // duración de connect
+        a1 [pos="517,-74"]   a2 [pos="517,-512"]   // duración de accept
+        t1 [pos="14,-535"]   t2 [pos="14,-572"]    // tiempo
+    }
+
+    edge [arrowhead=normal, color="#616161", penwidth=1]
+    C -> c_fin
+    L -> l_fin
+    N -> n_fin
+    t1 -> t2
+    tiempo [label="tiempo", fontcolor="#616161", pos="40,-553"]
+
+    // ---- segmentos
+    c1 -> l1 [color="#283593", penwidth=1.1]
+    syn [label="SYN, seq = x", fontcolor="#283593", pos="190,-106"]
+    l2 -> N [color="#2e7d32", style=dashed, arrowhead=vee]
+    crea [label="crea", fontcolor="#2e7d32", pos="272,-145"]
+    n1 -> c2 [color="#2e7d32", penwidth=1.1]
+    synack [label="SYN+ACK, seq = x+1", fontcolor="#2e7d32", pos="190,-195"]
+    c3 -> x1 [color="#283593", penwidth=1.1, arrowhead=none]
+    ack [label="ACK, seq = x+2", fontcolor="#283593", pos="178,-248"]
+    perdida [label="×", fontsize=20, fontcolor="#c62828", pos="219,-267"]
+    sepierde [label="se pierde", fontsize=10, fontcolor="#c62828", pos="219,-284"]
+    c4 -> n4 [color="#283593", penwidth=1.1]
+    largo [label="seq = x+2, 4 bytes\ncon message_length", fontcolor="#283593", pos="190,-318"]
+    n5 -> c5 [color="#2e7d32", penwidth=1.1]
+    acklargo [label="ACK, seq = x+6", fontcolor="#2e7d32", pos="190,-475"]
+    c6 -> n6 [dir=both, style=dashed]
+    datos [label="datos (send / recv)\ndesde seq = x+6", pos="190,-532"]
+
+    // ---- connect y send, en el cliente
+    k1 -> k2 [dir=both, arrowhead=tee, arrowtail=tee, color="#283593"]
+    connect [label="connect(address)", fontsize=12, fontcolor="#283593", pos="45,-84"]
+    send [label="send(message)", fontsize=12, fontcolor="#283593", pos="38,-310"]
+    {
+        node [fixedsize=true, width=1.444, height=1.2]
+        tc1 [label="x al azar en [0, 100]\renvía SYN a address\r", pos="64,-114"]
+        tc2 [label="llega el SYN+ACK:\rseq_num = x+2\r", pos="64,-224"]
+        tc3 [label="envía ACK y retorna\r", pos="64,-262"]
+        tc4 [label="primer segmento:\rel largo del mensaje\r", pos="64,-338"]
+        tc5 [label="llega el ACK x+6:\rsigue con los datos\r", pos="64,-504"]
+    }
+
+    // ---- accept, en el servidor
+    a1 -> a2 [dir=both, arrowhead=tee, arrowtail=tee, color="#2e7d32"]
+    accept [label="accept()", fontsize=12, fontcolor="#2e7d32", pos="498,-62"]
+    {
+        node [fixedsize=true, width=1.611, height=1.2]
+        ta1 [label="espera un SYN en L\l", pos="451,-84"]
+        ta2 [label="llega el SYN: crea N\lN.seq_num = x+1\l", pos="451,-160"]
+        ta3 [label="responde desde N y\lespera ACK seq = x+2\l", pos="451,-204"]
+        ta4 [label="el ACK no llega y N\lsigue esperando (si\lvence el timeout,\lreenvía el SYN+ACK)\l", pos="451,-282"]
+        ta5 [label="llega seq = x+2 sin\lflags: el cliente ya\lrecibió el SYN+ACK,\lasí que la conexión\lestá confirmada\l", pos="451,-372"]
+        ta6 [label="lo procesa como recv:\lguarda message_length\lN.expected_seq = x+6\lresponde ACK x+6 y\lretorna (N, dir. de N)\l", pos="451,-470"]
+    }
+}
