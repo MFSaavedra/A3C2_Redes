@@ -87,6 +87,7 @@ class SocketTCP:
                 if parsed["SYN"] and parsed["ACK"] and parsed["seq"] == self.seq_num + 1:
                     self.remote_address = addr  # el SYN+ACK viene del socket nuevo que creó accept
                     self.seq_num += 2
+                    self.expected_seq = self.seq_num
                     ack_segment = self.create_segment({"ACK": True, "seq": self.seq_num})
                     self.socket.sendto(ack_segment, self.remote_address)
                     self.is_connected = True
@@ -134,7 +135,7 @@ class SocketTCP:
                             message_length = int.from_bytes(parsed["payload"], "big")
                             new_socket.remaining_bytes = message_length
                             new_socket.expected_seq = parsed["seq"] + len(parsed["payload"])
-                            new_socket.seq_num = new_socket.expected_seq
+                            new_socket.seq_num += 1
                             ack_segment = new_socket.create_segment({"ACK": True, "seq": new_socket.expected_seq})
                             new_socket.socket.sendto(ack_segment, new_socket.remote_address)
                             new_socket.is_connected = True
