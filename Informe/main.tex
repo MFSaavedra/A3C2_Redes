@@ -73,6 +73,7 @@
 \newcommand{\code}[1]{#1}     % identificadores, funciones, archivos, comandos (SocketTCP, send, cliente.py)
 \newcommand{\flag}[1]{#1}     % flags del header (SYN, ACK, FIN)
 \newcommand{\field}[1]{#1}    % campos del header y variables del protocolo (seq, message_length, buff_size)
+\usepackage{upquote}          % comillas rectas en verbatim: b'...' se ve como en la salida real
 
 % INICIO DE PÁGINAS
 \begin{document}
@@ -152,29 +153,123 @@
 % (timeouts, retransmisiones, segmentos duplicados descartados).
 
 \section{Pruebas}
-% TODO: entorno (VM o localhost, versión de Python), y si las pérdidas se
-% indujeron con netem o a mano. Si es a mano, indicar cómo se controla la tasa
-% de pérdida y que aplica en ambas direcciones.
+Las pruebas se corrieron en localhost, en Arch Linux (kernel 7.2.9) con Python 3.14.8, con el modo
+debug activo y el timeout fijo de 2~s. Las pérdidas se indujeron con netem sobre la interfaz
+loopback, con los valores que sugiere el enunciado:
 
-\subsection{Handshake}
-% TODO: salida de la prueba del paso 4.
+{\small
+\begin{verbatim}
+sudo tc qdisc add dev lo root netem loss 20.0% delay 0.5s
+\end{verbatim}}
 
-\subsection{send y recv}
-% TODO: Tests 1, 2 y 3 del apartado "Test send y recv" del enunciado, sin
-% pérdidas.
+Como el cliente y el servidor se comunican por lo, la pérdida del 20~\% y el retardo de 0,5~s
+afectan a los segmentos en ambas direcciones, y el RTT queda en torno a 1~s, por debajo del
+timeout. Los scripts de las pruebas están en la carpeta \code{pruebas} del repositorio y guardan
+la salida de cada ejecución en \code{pruebas/salida}.
 
-\subsection{Cierre de conexión}
-% TODO: prueba del paso 6, sin pérdidas.
+\subsection{Sin pérdidas}
+\code{sh pruebas/sin\_perdidas.sh} corre los Tests 1, 2 y 3 del apartado «Test send y recv» del
+enunciado (\code{pruebas/server\_test.py} y \code{pruebas/client\_test.py}), seguidos de un Test 4
+propio (sección~\ref{sec:pruebas-buff-size}) y del cierre: el cliente llama a \code{close} y el
+servidor a \code{recv\_close}. Como los tests parten con \code{connect} y \code{accept}, la misma
+ejecución prueba el handshake (paso 4), \code{send} y \code{recv} (paso 5) y el cierre (paso 6). El
+servidor imprime:
 
-\subsection{Pruebas con pérdidas}
-% TODO: envío de un archivo de más de 16 bytes con netem loss + delay
-% (ej: sudo tc qdisc add dev lo root netem loss 20.0% delay 0.5s), con la
-% salida del modo debug mostrando las retransmisiones; verificar que el cierre
-% siempre se logra desde el lado que llama a close.
+{\small
+\begin{verbatim}
+Test 1 received: b'Mensje de len=16'
+Test 1: Passed
+Test 2 received: b'Mensaje de largo 19'
+Test 2: Passed
+Test 3 received: b'Mensaje de largo 19'
+Test 3: Passed
+\end{verbatim}}
+
+Después del Test 4, ambos programas imprimen «Conexión cerrada», así que \code{close} y
+\code{recv\_close} terminaron.
+
+\subsection{Con pérdidas}
+Con netem activo, \code{sh pruebas/perdidas.sh} envía cinco veces \code{pruebas/archivo.txt}, de
+199 bytes (13 segmentos de datos), de \code{cliente.py} a \code{servidor.py}, y compara con
+\code{cmp} el archivo recibido con el original. El script resume cada ejecución en una línea:
+
+{\small
+\begin{verbatim}
+Ejecución 1 (33 s): archivo íntegro, cliente cerró, servidor cerró
+Ejecución 2 (46 s): archivo íntegro, cliente cerró, servidor cerró
+Ejecución 3 (41 s): archivo íntegro, cliente cerró, servidor cerró
+Ejecución 4 (32 s): archivo íntegro, cliente cerró, servidor cerró
+Ejecución 5 (49 s): archivo íntegro, cliente cerró, servidor cerró
+\end{verbatim}}
+
+En las cinco ejecuciones el archivo llegó íntegro, \code{close} terminó en el cliente y el
+servidor, tras recibir el \flag{FIN} en \code{recv}, cerró con \code{recv\_close}. La ejecución 2
+pasa por todos los casos de pérdida. Esta es la salida de debug del cliente:
+
+{\small
+\begin{verbatim}
+Conectado a localhost:8000, enviando 199 bytes
+[DEBUG] timeout esperando ACK seq=66, se reenvía datos seq=50
+[DEBUG] timeout esperando ACK seq=82, se reenvía datos seq=66
+[DEBUG] timeout esperando ACK seq=82, se reenvía datos seq=66
+[DEBUG] timeout esperando ACK seq=98, se reenvía datos seq=82
+[DEBUG] timeout esperando ACK seq=130, se reenvía datos seq=114
+[DEBUG] timeout esperando ACK seq=146, se reenvía datos seq=130
+[DEBUG] timeout esperando ACK seq=194, se reenvía datos seq=178
+[DEBUG] timeout esperando ACK seq=194, se reenvía datos seq=178
+[DEBUG] timeout esperando ACK seq=194, se reenvía datos seq=178
+[DEBUG] timeout esperando ACK seq=194, se reenvía datos seq=178
+[DEBUG] timeout esperando ACK seq=210, se reenvía datos seq=194
+[DEBUG] timeout esperando ACK seq=234, se reenvía FIN seq=233
+[DEBUG] timeout esperando ACK seq=234, se reenvía FIN seq=233
+Archivo enviado y conexión cerrada
+\end{verbatim}}
+
+\noindent y la del servidor:
+
+{\small
+\begin{verbatim}
+Servidor escuchando en localhost:8000
+[DEBUG] se perdió el ACK del handshake, datos seq=30 confirma la conexión
+Conexión aceptada, atendida en 127.0.0.1:46541
+[DEBUG] datos seq=114 duplicado, se descarta y se reenvía ACK seq=130
+[DEBUG] datos seq=178 duplicado, se descarta y se reenvía ACK seq=194
+[DEBUG] datos seq=194 duplicado, se descarta y se reenvía ACK seq=210
+[DEBUG] timeout esperando ACK seq=235, se reenvía FIN+ACK seq=234
+[DEBUG] se descarta FIN seq=233, se espera ACK seq=235
+Recibidos 199 bytes, conexión cerrada
+\end{verbatim}}
+
+En esta salida se ve:
+\begin{itemize}
+	\item El último \flag{ACK} del handshake se perdió, y \code{accept} tomó como confirmación el
+	primer segmento de \code{send}, el que lleva el largo del mensaje (seq 30). Es el caso borde
+	del paso 7.
+	\item Se perdió un segmento de datos: el cliente reenvió el de seq 50 tras el timeout y el
+	servidor no informó un duplicado, porque el original nunca llegó.
+	\item Se perdió un \flag{ACK}: el cliente reenvió el segmento de seq 114, y el servidor lo
+	descartó por duplicado y reenvió el \flag{ACK} sin volver a entregar los datos.
+	\item En el cierre, el cliente reenvió el \flag{FIN} dos veces y el servidor el \flag{FIN+ACK}
+	una vez. El \flag{FIN} repetido que llegó mientras el servidor esperaba el \flag{ACK} final se
+	descartó, y ambos lados cerraron.
+\end{itemize}
+
+En las ejecuciones 1 y 4 además se perdió el \flag{SYN} o el \flag{SYN+ACK}, y \code{connect} o
+\code{accept} lo reenvió tras el timeout.
 
 \subsection{recv con buff\_size menor que message\_length}
-% TODO: archivo de 2n bytes recibido con dos llamadas a recv(n), con n no
-% múltiplo de 16.
+\label{sec:pruebas-buff-size}
+El Test 4 de la prueba sin pérdidas envía un mensaje de $2n = 42$ bytes y lo lee con dos
+llamadas a \code{recv(21)}, y 21 no es múltiplo de 16. El mensaje viaja en segmentos de 16, 16 y
+10 bytes, así que la primera llamada junta 32 bytes, retorna 21 y guarda los 11 que sobran. La
+segunda los entrega junto con los últimos 10:
+
+{\small
+\begin{verbatim}
+Test 4 received part 1: b'Mensaje de largo 42, ' (21 bytes)
+Test 4 received part 2: b'recibido en 2 mitades' (21 bytes)
+Test 4: Passed
+\end{verbatim}}
 
 \section{Situaciones de borde no especificadas}
 % TODO: cualquier caso no cubierto por el enunciado y la decisión tomada
