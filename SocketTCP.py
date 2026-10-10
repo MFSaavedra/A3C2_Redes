@@ -1,5 +1,6 @@
 import socket
 import random
+import sys
 import time
 
 # Formato del segmento: [flags: 1 byte][seq: 4 bytes, big-endian][datos: 0 a 16 bytes]
@@ -10,6 +11,20 @@ SEQ_SIZE = 4
 HEADER_SIZE = 1 + SEQ_SIZE
 MAX_PAYLOAD = 16                         # máximo de datos por segmento (enunciado)
 BUFFER_SIZE = HEADER_SIZE + MAX_PAYLOAD  # buffer fijo del socket UDP interno
+
+# Modo debug: muestra cómo se manejan las pérdidas (timeouts, reenvíos y segmentos descartados).
+# Imprime en stderr para no mezclarse con el archivo que servidor.py escribe en stdout
+DEBUG = True
+
+def debug(message):
+    if DEBUG:
+        print(f"[DEBUG] {message}", file=sys.stderr)
+
+# Nombre corto de un segmento para el modo debug, ej: "SYN+ACK seq=43" o "datos seq=44"
+def describe(segment):
+    parsed = SocketTCP.parse_segment(segment)
+    flags = "+".join(flag for flag in ("SYN", "FIN", "ACK") if parsed[flag])
+    return f"{flags or 'datos'} seq={parsed['seq']}"
 
 class SocketTCP:
     def __init__(self):
@@ -70,6 +85,7 @@ class SocketTCP:
                     self.socket.sendto(ack_segment, self.remote_address)
                     self.is_connected = True
             except socket.timeout:
+                debug(f"timeout esperando SYN+ACK, se reenvía {describe(syn_segment)}")
                 self.socket.sendto(syn_segment, self.remote_address)
 
     def accept(self):
@@ -98,12 +114,14 @@ class SocketTCP:
                             new_socket.expected_seq = new_socket.seq_num
                             new_socket.is_connected = True
                             if parsed["FIN"]:
+                                debug(f"se perdió el ACK del handshake, {describe(data)} confirma la conexión")
                                 new_socket.fin_seq = parsed["seq"]
                             return new_socket, new_socket.local_address
 
                         # Caso borde: se perdió el ACK final y llegó el primer segmento de datos
                         if (not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"] and
                             parsed["seq"] == new_socket.seq_num + 1 and len(parsed["payload"]) == 4):
+                            debug(f"se perdió el ACK del handshake, {describe(data)} confirma la conexión")
                             message_length = int.from_bytes(parsed["payload"], "big") # este segmento contiene el largo del mensaje
                             new_socket.remaining_bytes = message_length
                             new_socket.expected_seq = parsed["seq"] + len(parsed["payload"])
@@ -115,6 +133,7 @@ class SocketTCP:
                             return new_socket, new_socket.local_address
                     
                     except socket.timeout:
+                        debug(f"timeout esperando ACK seq={new_socket.seq_num + 1}, se reenvía {describe(syn_ack)}")
                         new_socket.socket.sendto(syn_ack, new_socket.remote_address)
 
     def send(self, message):
@@ -150,10 +169,13 @@ class SocketTCP:
                 if parsed["ACK"] and parsed["seq"] == expected_ack:
                     self.seq_num = expected_ack
                     return True
+                debug(f"se descarta {describe(data)}, se espera ACK seq={expected_ack}")
                 remaining = deadline - time.monotonic()
             timeouts += 1
             if max_timeouts is not None and timeouts == max_timeouts:
+                debug(f"{timeouts} timeouts sin respuesta, se deja de reenviar {describe(segment)}")
                 return False
+            debug(f"timeout esperando ACK seq={expected_ack}, se reenvía {describe(segment)}")
 
     def recv(self, buff_size):
         self.socket.settimeout(self.timeout)
@@ -188,6 +210,7 @@ class SocketTCP:
                     if parsed and not parsed["ACK"] and not parsed["SYN"] and not parsed["FIN"]:
                         if parsed["seq"] != self.expected_seq:
                             if parsed["seq"] < self.expected_seq:  # duplicado: su ACK se perdió
+                                debug(f"{describe(data)} duplicado, se descarta y se reenvía ACK seq={self.expected_seq}")
                                 self.socket.sendto(self.create_segment({"ACK": True, "seq": self.expected_seq}), addr)
                             continue
                         message_length = int.from_bytes(parsed["payload"], "big")
@@ -216,6 +239,7 @@ class SocketTCP:
                         ack_segment = self.create_segment({"ACK": True, "seq": self.expected_seq})
                         self.socket.sendto(ack_segment, addr)
                     elif parsed["seq"] < self.expected_seq:
+                        debug(f"{describe(data)} duplicado, se descarta y se reenvía ACK seq={self.expected_seq}")
                         ack_segment = self.create_segment({"ACK": True, "seq": self.expected_seq})
                         self.socket.sendto(ack_segment, addr)
 
@@ -261,6 +285,7 @@ class SocketTCP:
             # dato repetido: si el ACK del último segmento se perdió, el send del otro lado lo sigue
             # reenviando y nunca llega a close
             elif not (parsed["ACK"] or parsed["SYN"]) and parsed["seq"] < self.expected_seq:
+                debug(f"{describe(data)} duplicado, se descarta y se reenvía ACK seq={self.expected_seq}")
                 self.socket.sendto(self.create_segment({"ACK": True, "seq": self.expected_seq}), addr)
 
         self.seq_num = self.fin_seq + 1
