@@ -34,6 +34,10 @@ sudo tc qdisc add dev lo root netem loss 20.0% delay 0.5s
 sudo tc qdisc del dev lo root netem
 ```
 
+El modo debug se controla con la constante `DEBUG` al inicio de `SocketTCP.py` (activado
+por defecto). Imprime en stderr cada timeout, reenvío y segmento descartado, así que solo
+muestra algo cuando hay pérdidas.
+
 ## Archivos
 
 - **`SocketTCP.py`** — la clase `SocketTCP`: formato de segmento, handshake, `send` y
