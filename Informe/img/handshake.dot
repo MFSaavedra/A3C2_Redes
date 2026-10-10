@@ -1,0 +1,71 @@
+// 3-way handshake (paso 4) y su correspondencia con connect y accept.
+// Las posiciones van fijas en puntos (y crece hacia arriba): se genera con ./render.sh
+digraph handshake {
+    graph [splines=false, margin=0, pad=0.03]
+    node  [shape=plaintext, fontname="LM Roman 10,", fontsize=11, fontcolor="#212121",
+           margin=0, width=0, height=0]
+    edge  [arrowsize=0.7, penwidth=1.1]
+
+    // Líneas de vida en x = 126 (C), 254 (L) y 338 (N). Lo que hace connect va a la
+    // izquierda de C y lo que hace accept a la derecha de N.
+
+    // ---- sockets y líneas de vida
+    cliente  [label="Cliente", fontsize=13, pos="126,0"]
+    servidor [label="Servidor", fontsize=13, pos="296,0"]
+    C [shape=box, margin="0.06,0.03", label="socket del cliente (C)\npuerto efímero", pos="126,-32"]
+    L [shape=box, margin="0.06,0.03", label="socket de escucha (L)\nbind(address)", pos="254,-32"]
+    N [shape=box, margin="0.06,0.03", label="socket nuevo (N)", pos="338,-162"]
+
+    {
+        node [shape=point, width=0.01, style=invis]
+        c_fin [pos="126,-420"]  l_fin [pos="254,-420"]  n_fin [pos="338,-420"]
+        c1 [pos="126,-122"]  l1 [pos="254,-140"]   // SYN
+        l2 [pos="254,-162"]                         // accept crea N
+        n1 [pos="338,-226"]  c2 [pos="126,-244"]   // SYN+ACK
+        c3 [pos="126,-298"]  n2 [pos="338,-316"]   // ACK
+        c4 [pos="126,-400"]  n3 [pos="338,-400"]   // datos
+        k1 [pos="3,-96"]     k2 [pos="3,-302"]     // duración de connect
+        a1 [pos="517,-74"]   a2 [pos="517,-369"]   // duración de accept
+        t1 [pos="14,-330"]   t2 [pos="14,-418"]    // tiempo
+    }
+
+    edge [arrowhead=normal, color="#616161", penwidth=1]
+    C -> c_fin
+    L -> l_fin
+    N -> n_fin
+    t1 -> t2
+    tiempo [label="tiempo", fontcolor="#616161", pos="40,-374"]
+
+    // ---- segmentos del handshake
+    c1 -> l1 [color="#283593", penwidth=1.1]
+    syn [label="SYN, seq = x", fontcolor="#283593", pos="190,-116"]
+    l2 -> N [color="#2e7d32", style=dashed, arrowhead=vee]
+    crea [label="crea", fontcolor="#2e7d32", pos="272,-155"]
+    n1 -> c2 [color="#2e7d32", penwidth=1.1]
+    synack [label="SYN+ACK, seq = x+1", fontcolor="#2e7d32", pos="190,-223"]
+    c3 -> n2 [color="#283593", penwidth=1.1]
+    ack [label="ACK, seq = x+2", fontcolor="#283593", pos="190,-290"]
+    c4 -> n3 [dir=both, style=dashed]
+    datos [label="datos (send / recv)\ndesde seq = x+2", pos="190,-380"]
+
+    // ---- connect, en el cliente
+    k1 -> k2 [dir=both, arrowhead=tee, arrowtail=tee, color="#283593"]
+    connect [label="connect(address)", fontsize=12, fontcolor="#283593", pos="45,-84"]
+    {
+        node [fixedsize=true, width=1.444, height=1.2]
+        tc1 [label="x al azar en [0, 100]\renvía SYN a address\r", pos="64,-114"]
+        tc2 [label="llega el SYN+ACK:\rremote_address = N\rseq_num = x+2\r", pos="64,-260.5"]
+        tc3 [label="envía ACK y retorna\r", pos="64,-298"]
+    }
+
+    // ---- accept, en el servidor
+    a1 -> a2 [dir=both, arrowhead=tee, arrowtail=tee, color="#2e7d32"]
+    accept [label="accept()", fontsize=12, fontcolor="#2e7d32", pos="498,-62"]
+    {
+        node [fixedsize=true, width=1.611, height=1.2]
+        ta1 [label="espera un SYN en L\l", pos="451,-84"]
+        ta2 [label="llega el SYN: crea N,\lbind((host, 0)): el SO\lelige el puerto de N\lN.remote_address = C\lN.seq_num = x+1\l", pos="451,-173"]
+        ta3 [label="responde desde N\l", pos="451,-226"]
+        ta4 [label="llega el ACK a N:\lN.seq_num = x+2\lN.expected_seq = x+2\lretorna (N, dir. de N)\l", pos="451,-340.75"]
+    }
+}

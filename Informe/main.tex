@@ -109,14 +109,13 @@
 % TODO (paso 4): bind, connect y accept; número de secuencia inicial aleatorio
 % en [0, 100]; por qué accept retorna un socket nuevo en una dirección distinta.
 
-% TODO: diagrama del 3-way handshake con los pasos asociados a connect y accept
-% (obligatorio en el informe). Sugerencia: generarlo desde un .dot en img/.
-%\begin{figure}[ht]
-%	\centering
-%	\includegraphics[width=0.7\textwidth]{img/handshake.pdf}
-%	\caption{3-way handshake y su correspondencia con \code{connect} y \code{accept}.}
-%	\label{fig:handshake}
-%\end{figure}
+% Fuente en img/handshake.dot; el PDF se regenera con img/render.sh.
+\begin{figure}[ht]
+	\centering
+	\includegraphics[width=\textwidth]{img/handshake.pdf}
+	\caption{3-way handshake y su correspondencia con \code{connect} y \code{accept}.}
+	\label{fig:handshake}
+\end{figure}
 
 \subsection{Stop \& Wait: send y recv}
 % TODO (paso 5): timeout fijo elegido y por qué; settimeout y manejo del error;
