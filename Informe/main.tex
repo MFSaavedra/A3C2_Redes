@@ -55,7 +55,7 @@
 		& \\
 		\multicolumn{2}{l}{Fecha de realización: \today} \\
 		% TODO: confirmar la fecha de entrega de la actividad 3
-		\multicolumn{2}{l}{Fecha de entrega: \today} \\
+		\multicolumn{2}{l}{Fecha de entrega: 19 de octubre de 2026} \\
 		\multicolumn{2}{l}{\universitylocation}
 	\end{tabular}
 }
@@ -98,17 +98,38 @@
 % ======================= INICIO DEL DOCUMENTO =======================
 
 \section{Diseño de SocketTCP}
-% TODO: qué guarda el constructor (socket UDP, dirección de destino, número de
-% secuencia, bytes pendientes de recv, timeout) y por qué no recibe parámetros.
+Como un socket de Python, el constructor no recibe
+parámetros: crea el socket UDP interno y deja vacío el resto del estado, que completan
+\code{bind}, \code{connect} y \code{accept}. Ese estado es la dirección propia y la de la
+contraparte, el número de secuencia con que se envía (\field{seq\_num}) y el que se espera
+recibir (\field{expected\_seq}), el timeout, y lo que \code{recv} necesita entre llamadas: los
+bytes que faltan del mensaje en curso (\field{remaining\_bytes}), los ya recibidos que aún no
+retorna (\field{pending\_buffer}) y el \field{seq} de un \flag{FIN} que llegue antes de
+\code{recv\_close} (\field{fin\_seq}).
 
 \subsection{Formato del segmento}
-% TODO (paso 3): cómo se codifican en bytes SYN, ACK, FIN y seq; tamaño fijo del
-% header; tamaño del buffer del socket UDP (header + 16); parse_segment y
-% create_segment.
+El header ocupa 5 bytes fijos: un byte de flags, con un bit para \flag{ACK} (0x01), \flag{SYN}
+(0x02) y \flag{FIN} (0x04), y 4 bytes con \field{seq} en big-endian. Le siguen de 0 a 16 bytes
+de datos, así que el socket UDP interno siempre lee con un buffer de 21 bytes.
+\code{parse\_segment} convierte un segmento en un diccionario con los tres flags, \field{seq} y
+los datos, y \code{create\_segment} hace lo inverso.
+
+\field{seq} cuenta bytes, al igual que en TCP, un segmento de datos lo avanza en el largo de sus datos y
+su \flag{ACK} lleva el \field{seq} del siguiente byte esperado. En el handshake y en el cierre,
+cada segmento lo avanza en 1. Los segmentos de datos no llevan flags.
 
 \subsection{3-way handshake}
-% TODO (paso 4): bind, connect y accept; número de secuencia inicial aleatorio
-% en [0, 100]; por qué accept retorna un socket nuevo en una dirección distinta.
+\code{bind} asocia el socket UDP a una dirección. \code{connect} elige el \field{seq} inicial x
+al azar en [0, 100] y envía un \flag{SYN}. \code{accept} lo recibe en el socket de escucha, crea
+un \code{SocketTCP} nuevo en el mismo host con puerto 0, para que el sistema operativo elija uno
+libre, y responde \flag{SYN+ACK} desde él. El cliente adopta como contraparte la dirección de
+origen del \flag{SYN+ACK}, así que aprende la del socket nuevo sin un mensaje extra, y confirma
+con \flag{ACK}. Al recibirlo, \code{accept} retorna el socket nuevo y su dirección
+(figura~\ref{fig:handshake}). Los datos van por ese socket, y el de escucha queda libre para
+otras conexiones, como en TCP.
+
+Ambos lados usan un solo contador: el \flag{SYN+ACK} lleva x+1 en vez de un número inicial
+propio, el \flag{ACK} lleva x+2 y los datos de ambos sentidos parten desde x+2.
 
 % Fuente en img/handshake.dot; el PDF se regenera con img/render.sh.
 \begin{figure}[ht]
@@ -119,26 +140,74 @@
 \end{figure}
 
 \subsection{Stop \& Wait: send y recv}
-% TODO (paso 5): timeout fijo elegido y por qué; settimeout y manejo del error;
-% primer segmento con message_length; división en trozos de 16 bytes; seq
-% inicial = último seq almacenado.
-%
-% TODO: decisiones de diseño de recv (el enunciado las pide explícitamente):
-%  - cómo se sabe si recv está empezando un mensaje o continuando uno
-%    (variable de bytes pendientes en el constructor u otra forma);
-%  - condición de retorno: len(recibido) >= min(message_length, buff_size);
-%  - qué se hace con el excedente cuando len(recibido) - buff_size > 0
-%    (retornar a lo más buff_size bytes sin perder datos);
-%  - buff_size afecta solo a SocketTCP, no al buffer del socket UDP.
+El timeout es fijo, de 2~s. Con netem delay 0.5s cada sentido demora 0,5~s y el RTT ronda 1~s,
+así que un timeout de 1~s o menos provocaría reenvíos innecesarios. Se fija con
+\code{settimeout} del socket UDP, y la excepción \code{socket.timeout} que se levanta al vencer
+es la señal para reenviar.
+
+\code{send} envía primero un segmento con \field{message\_length} en 4 bytes, con el último
+\field{seq} almacenado, y luego el mensaje en trozos de a lo más 16 bytes. Reenvía cada segmento
+tras cada timeout hasta recibir el \flag{ACK} con el \field{seq} siguiente, y descarta lo demás
+sin reiniciar el plazo. El receptor confirma cada segmento que llega en orden. Si llega uno con
+\field{seq} menor al esperado, es un duplicado cuyo \flag{ACK} se perdió: lo descarta y reenvía
+el \flag{ACK}.
+
+Decisiones de diseño de \code{recv}:
+\begin{itemize}
+	\item \field{remaining\_bytes} indica si hay un mensaje a medias. Si es 0 y no quedan bytes
+	guardados, \code{recv} espera el segmento con \field{message\_length} de un mensaje nuevo; si
+	no, sigue recibiendo datos del actual.
+	\item Retorna apenas junta \code{min(message\_length, buff\_size)} bytes, o lo que quede del
+	mensaje en curso si es menos. Nunca mezcla dos mensajes.
+	\item Como los segmentos traen 16 bytes, puede juntar más de \field{buff\_size} (32 bytes con
+	\code{recv(21)}, por ejemplo). Retorna exactamente \field{buff\_size} y guarda el excedente en
+	\field{pending\_buffer}, que la siguiente llamada entrega primero, así que no se pierden datos.
+	\item \field{buff\_size} solo afecta a \code{SocketTCP}: el socket UDP siempre lee con su
+	buffer fijo de 21 bytes.
+\end{itemize}
 
 \subsection{Cierre de conexión}
-% TODO (pasos 6 y 8): close (Host A) y recv_close (Host B); reintento del FIN
-% hasta 3 timeouts; reenvío del último ACK tres veces con un timeout entre cada
-% envío; qué pasa cuando recv recibe un FIN.
+El cierre usa el mismo contador que el handshake. Si s es el \field{seq} tras el último
+\code{send}, \code{close} (Host A) envía \flag{FIN} con s, \code{recv\_close} (Host B) responde
+\flag{FIN+ACK} con s+1 y Host A termina con \flag{ACK} s+2. Host B confirma el \flag{FIN} y envía
+el suyo en un mismo segmento, porque ya no le queda nada por enviar.
+
+Ante pérdidas (paso 8), \code{close} reenvía el \flag{FIN} tras cada timeout y, si al tercero no
+llegó el \flag{FIN+ACK}, asume que la contraparte cerró. Si llega, envía el \flag{ACK} final tres
+veces, separadas por un timeout, porque nadie lo confirma. \code{recv\_close} reenvía el
+\flag{FIN+ACK} mientras espera ese \flag{ACK}, hasta 3 timeouts, y luego cierra de todas formas.
+Mientras espera el \flag{FIN} también confirma los datos duplicados: si se perdió el \flag{ACK}
+del último segmento, el \code{send} del otro lado lo sigue reenviando y nunca llega a
+\code{close}.
+
+Cuando \code{recv} recibe un \flag{FIN} retorna \code{b\textquotedbl\textquotedbl{}}, como un socket TCP cuando la
+contraparte cierra, y guarda su \field{seq} para que \code{recv\_close} lo responda de inmediato.
+El \flag{FIN} solo puede llegar entre mensajes, porque \code{send} no retorna hasta que se
+confirman todos sus datos.
 
 \subsection{Manejo de pérdidas en el handshake}
-% TODO (paso 7): Stop & Wait en connect y accept; caso borde en que se pierde el
-% último ACK del handshake y cómo se resolvió (qué funciones hubo que modificar).
+\code{connect} reenvía el \flag{SYN} tras cada timeout hasta recibir el \flag{SYN+ACK}, y el
+socket nuevo de \code{accept} reenvía el \flag{SYN+ACK} hasta recibir el \flag{ACK}. El caso
+borde es que se pierda ese último \flag{ACK} (figura~\ref{fig:handshake-ack-perdido}):
+\code{connect} ya retornó y el cliente pasa a \code{send}, mientras \code{accept} sigue esperando.
+Si \code{accept} solo aceptara un \flag{ACK}, descartaría los datos del cliente, y el cliente
+descartaría el \flag{SYN+ACK} reenviado porque no es el \flag{ACK} que espera: ambos reenviarían
+para siempre.
+
+La clave es que el cliente solo envía un segmento con \field{seq} x+2 si recibió el
+\flag{SYN+ACK}, así que ese segmento confirma la conexión igual que el \flag{ACK}. Por eso
+\code{accept} también acepta:
+\begin{itemize}
+	\item El primer segmento de \code{send}, con \field{message\_length}. Lo procesa como lo haría
+	\code{recv}: guarda el largo en \field{remaining\_bytes}, avanza \field{expected\_seq} a x+6 y
+	responde el \flag{ACK}.
+	\item Un \flag{FIN} con \field{seq} x+2, si el cliente cerró sin enviar datos. Queda en
+	\field{fin\_seq}, así que \code{recv} retorna \code{b\textquotedbl\textquotedbl{}} y \code{recv\_close} lo responde.
+\end{itemize}
+Solo hubo que modificar \code{accept}: deja el estado igual que si \code{recv} hubiera procesado
+el segmento, así que \code{recv} y \code{recv\_close} no cambian. Tampoco \code{send}, que
+descarta el \flag{SYN+ACK} reenviado como cualquier segmento inesperado. La ejecución 2 de la
+sección~\ref{sec:pruebas-perdidas} muestra este caso.
 
 % Fuente en img/handshake_ack_perdido.dot; el PDF se regenera con img/render.sh.
 \begin{figure}[htbp]
@@ -149,8 +218,13 @@
 \end{figure}
 
 \subsection{Modo debug}
-% TODO: cómo se activa; qué imprime cuando hay pérdida y cómo la maneja
-% (timeouts, retransmisiones, segmentos duplicados descartados).
+Se controla con la variable \code{DEBUG} al inicio de \code{SocketTCP.py}, activada por omisión.
+Cada mensaje empieza con [DEBUG] y va a stderr, para no mezclarse con el archivo que
+\code{servidor.py} escribe en stdout. Sin pérdidas no imprime nada. Con pérdidas informa cada
+timeout y el segmento que se reenvía, los duplicados que se descartan y se vuelven a confirmar,
+los segmentos inesperados que se descartan mientras se espera un \flag{ACK}, la pérdida del
+último \flag{ACK} del handshake, y cuando \code{close} o \code{recv\_close} dejan de reenviar
+tras 3 timeouts. La sección~\ref{sec:pruebas-perdidas} muestra una salida completa.
 
 \section{Pruebas}
 Las pruebas se corrieron en localhost, en Arch Linux (kernel 7.2.9) con Python 3.14.8, con el modo
@@ -189,6 +263,7 @@ Después del Test 4, ambos programas imprimen «Conexión cerrada», así que \c
 \code{recv\_close} terminaron.
 
 \subsection{Con pérdidas}
+\label{sec:pruebas-perdidas}
 Con netem activo, \code{sh pruebas/perdidas.sh} envía cinco veces \code{pruebas/archivo.txt}, de
 199 bytes (13 segmentos de datos), de \code{cliente.py} a \code{servidor.py}, y compara con
 \code{cmp} el archivo recibido con el original. El script resume cada ejecución en una línea:
@@ -272,28 +347,54 @@ Test 4: Passed
 \end{verbatim}}
 
 \section{Situaciones de borde no especificadas}
-% TODO: cualquier caso no cubierto por el enunciado y la decisión tomada
-% (el enunciado pide indicarlos explícitamente).
+\begin{itemize}
+	\item Datos del servidor al cliente con pérdidas. El enunciado y las pruebas solo envían datos
+	del cliente al servidor. En el otro sentido hay dos casos que bloquean a ambos lados. Si el
+	servidor envía primero y se pierde el último \flag{ACK} del handshake, \code{accept} reenvía el
+	\flag{SYN+ACK}, pero el \code{recv} del cliente lo ignora y no vuelve a enviar el \flag{ACK}. Y
+	si un lado responde justo después de recibir y se perdió su último \flag{ACK}, la contraparte
+	sigue en \code{send} reenviando ese segmento, mientras el que responde lo descarta porque
+	espera el \flag{ACK} de lo suyo. La solución sería volver a confirmar los segmentos repetidos en
+	todo punto donde el socket lee, no solo en \code{recv} y \code{recv\_close}. No se implementó
+	porque ningún escenario del enunciado lo requiere y cambiaría el código de \code{send} y
+	\code{recv}.
+	\item Si se pierden los tres \flag{FIN} de \code{close} (un 0,8~\% de las veces con 20~\% de
+	pérdida), el cliente cierra pero el servidor sigue esperando en \code{recv}, porque el
+	enunciado solo acota la espera del último \flag{ACK}, no la del \flag{FIN}.
+	\item Un mensaje vacío: \code{send(b\textquotedbl\textquotedbl{})} solo envía \field{message\_length} = 0 y \code{recv}
+	retorna \code{b\textquotedbl\textquotedbl{}}, lo mismo que cuando la contraparte cierra. En la entrega solo pasa con un
+	archivo vacío, y el servidor igual termina bien: sale de su ciclo y \code{recv\_close} espera
+	el \flag{FIN}.
+\end{itemize}
 
 \section{Ejecución y repositorio}
-% TODO: cómo se ejecutan servidor y cliente, y cómo se activa el modo debug.
+Primero se inicia el servidor, que queda esperando en \code{accept}, y luego el cliente, que lee
+el archivo desde la entrada estándar:
 
 \begin{verbatim}
-python3 servidor.py localhost 8000
+python3 servidor.py localhost 8000 > recibido.txt
 python3 cliente.py localhost 8000 < archivo.txt
 \end{verbatim}
+
+El servidor escribe el archivo en stdout y sus mensajes de estado en stderr. Un tercer argumento
+opcional fija el \field{buff\_size} de cada \code{recv} (1024 por omisión). El modo debug se
+controla con \code{DEBUG} en \code{SocketTCP.py}, y las pruebas de la sección 2 se corren con
+\code{sh pruebas/sin\_perdidas.sh} y \code{sh pruebas/perdidas.sh}.
 
 El código está en \url{https://github.com/MFSaavedra/A3C2_Redes}.
 
 \section{Declaración de uso de IA}
-% TODO: obligatoria; sin ella no se considera el puntaje del informe. Indicar el
-% modelo y dónde se usó (código, redacción, pruebas, diagramas).
-En la elaboración de este informe se utilizaron modelos de inteligencia artificial. Se utilizaron Gemini y Claude (Opus 5).
+En la elaboración de este informe se utilizaron modelos de inteligencia artificial para editar el template de LaTeX, organizar secciones y traspasar a grafos de graphviz las figuras \ref{fig:handshake} y \ref{fig:handshake-ack-perdido}. Se utilizaron Gemini y Claude (Opus 5.5).
 
 Su uso se resume a:
 \begin{itemize}
-	\item % TODO
+	\item Aclarar conceptos relacionados con TCP, Stop \& Wait y el formato de sus segmentos.
+	\item Explicar el uso de netem para simular pérdidas y retardo en la interfaz de loopback.
+	\item Corregir/debuggear y complementar código; y otras discusiones técnicas de programación.
+	\item Escribir los scripts de las pruebas de funcionalidad y con pérdidas, y redactar las secciones correspondientes a partir de sus salidas.
 \end{itemize}
+
+Los modelos se emplearon como herramientas de consulta y explicación para comprender mejor los temas técnicos, y como apoyo en la ejecución y documentación de las pruebas.
 
 % FIN DEL DOCUMENTO
 \end{document}
