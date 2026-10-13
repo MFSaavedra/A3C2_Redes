@@ -107,16 +107,43 @@ bytes que faltan del mensaje en curso (\field{remaining\_bytes}), los ya recibid
 retorna (\field{pending\_buffer}) y el \field{seq} de un \flag{FIN} que llegue antes de
 \code{recv\_close} (\field{fin\_seq}).
 
+El enunciado fija la interfaz de la clase y lo que debe pasar ante pérdidas, pero deja como
+decisión de diseño el formato del header, la forma de numerar los segmentos, el valor del timeout
+y cómo resolver los casos borde. Cada subsección explica qué se eligió y por qué.
+
 \subsection{Formato del segmento}
 El header ocupa 5 bytes fijos: un byte de flags, con un bit para \flag{ACK} (0x01), \flag{SYN}
 (0x02) y \flag{FIN} (0x04), y 4 bytes con \field{seq} en big-endian. Le siguen de 0 a 16 bytes
 de datos, así que el socket UDP interno siempre lee con un buffer de 21 bytes.
 \code{parse\_segment} convierte un segmento en un diccionario con los tres flags, \field{seq} y
-los datos, y \code{create\_segment} hace lo inverso.
+los datos, y \code{create\_segment} hace lo inverso. Las razones de este formato son:
+\begin{itemize}
+	\item Como cada flag es un bit, un segmento puede llevar varios a la vez (\flag{SYN+ACK},
+	\flag{FIN+ACK}) sin definir un código para cada combinación, y los tres caben en un byte.
+	\item \field{seq} usa 4 bytes porque cuenta bytes: con 2 se desbordaría pasados los 65\,535
+	bytes, lo que limitaría los archivos a unos 64~KB. Con 4 alcanza para unos 4~GB por conexión,
+	así que no se implementó la vuelta a 0 que hace TCP.
+	\item No hay un campo aparte para el número de \flag{ACK}. Con Stop \& Wait hay un solo segmento
+	sin confirmar a la vez, así que basta un número: en un segmento con \flag{ACK}, \field{seq} es el
+	número que se confirma.
+	\item No hay campos de largo ni de checksum. UDP entrega cada datagrama completo y por separado,
+	así que el largo de los datos es el del datagrama menos 5 bytes, y el checksum de UDP ya descarta
+	los datagramas corruptos.
+\end{itemize}
 
-\field{seq} cuenta bytes, al igual que en TCP, un segmento de datos lo avanza en el largo de sus datos y
-su \flag{ACK} lleva el \field{seq} del siguiente byte esperado. En el handshake y en el cierre,
-cada segmento lo avanza en 1. Los segmentos de datos no llevan flags.
+\field{seq} cuenta bytes, al igual que en TCP: un segmento de datos lo avanza en el largo de sus
+datos, y en el handshake y en el cierre cada segmento lo avanza en 1. Todo \flag{ACK} sigue la
+misma regla: lleva el \field{seq} del segmento que confirma más su tamaño, que es el largo de sus
+datos o 1 en el handshake y el cierre. A Stop \& Wait le bastaría un bit que alterne entre 0 y 1,
+pero contar bytes tiene tres ventajas: los números que se confirman solo crecen, así que un
+\flag{ACK} atrasado nunca se confunde con el esperado; un duplicado se reconoce porque su
+\field{seq} es menor que \field{expected\_seq}; y en el modo debug el \field{seq} de un segmento
+reenviado dice qué parte del mensaje lleva.
+
+Los segmentos de datos no llevan flags, y el que lleva \field{message\_length} es un segmento de
+datos más: ocupa 4 números de secuencia y se confirma y se reenvía igual que el resto, sin un
+caso especial en \code{send}. El receptor sabe que trae el largo por su estado, porque no hay un
+mensaje a medias, y no por un flag.
 
 \subsection{3-way handshake}
 \code{bind} asocia el socket UDP a una dirección. \code{connect} elige el \field{seq} inicial x
@@ -126,10 +153,20 @@ libre, y responde \flag{SYN+ACK} desde él. El cliente adopta como contraparte l
 origen del \flag{SYN+ACK}, así que aprende la del socket nuevo sin un mensaje extra, y confirma
 con \flag{ACK}. Al recibirlo, \code{accept} retorna el socket nuevo y su dirección
 (figura~\ref{fig:handshake}). Los datos van por ese socket, y el de escucha queda libre para
-otras conexiones, como en TCP.
+otras conexiones, como en TCP. El socket de escucha no tiene timeout: \code{accept} espera un
+\flag{SYN} indefinidamente, como un servidor TCP.
+
+Pedir el puerto 0 en vez de uno fijo, como el de escucha más 1, evita chocar con un puerto
+ocupado o con otra conexión. Tomar la dirección del origen del \flag{SYN+ACK}, que
+\code{recvfrom} entrega junto a cada datagrama, evita poner el puerto en los datos del segmento.
 
 Ambos lados usan un solo contador: el \flag{SYN+ACK} lleva x+1 en vez de un número inicial
-propio, el \flag{ACK} lleva x+2 y los datos de ambos sentidos parten desde x+2.
+propio, el \flag{ACK} lleva x+2 y los datos de ambos sentidos parten desde x+2. El enunciado solo
+pide un número inicial, el de \code{connect}, y con un contador cada segmento del handshake
+confirma al anterior con su propio \field{seq}, según la regla de los \flag{ACK}: x+1 confirma el
+\flag{SYN} x, y x+2 confirma el \flag{SYN+ACK} x+1. TCP necesita un campo de número de \flag{ACK}
+aparte porque cada lado elige su número inicial; aquí basta \field{seq}. Además, ambos lados
+terminan el handshake sabiendo dónde parte la numeración de cada sentido.
 
 % Fuente en img/handshake.dot; el PDF se regenera con img/render.sh.
 \begin{figure}[ht]
@@ -140,17 +177,39 @@ propio, el \flag{ACK} lleva x+2 y los datos de ambos sentidos parten desde x+2.
 \end{figure}
 
 \subsection{Stop \& Wait: send y recv}
-El timeout es fijo, de 2~s. Con netem delay 0.5s cada sentido demora 0,5~s y el RTT ronda 1~s,
-así que un timeout de 1~s o menos provocaría reenvíos innecesarios. Se fija con
-\code{settimeout} del socket UDP, y la excepción \code{socket.timeout} que se levanta al vencer
-es la señal para reenviar.
+El timeout es fijo, de 2~s. Se fija con \code{settimeout} del socket UDP, y la excepción
+\code{socket.timeout} que se levanta al vencer es la señal para reenviar. Con netem delay 0.5s
+cada sentido demora 0,5~s y el RTT ronda 1~s, así que con un timeout de 1~s o menos el plazo
+vencería antes de que llegue el \flag{ACK} y se reenviaría cada segmento aunque no se haya
+perdido. Un timeout más largo evita esos reenvíos, pero cada pérdida cuesta un timeout completo.
+Con 20~\% de pérdida en cada sentido, un intento tiene éxito si llegan el segmento y su
+\flag{ACK}, con probabilidad $0{,}8 \times 0{,}8 = 0{,}64$. Cada segmento falla entonces en
+promedio $1/0{,}64 - 1 \approx 0{,}56$ veces y demora $1 + 0{,}56 \times 2 \approx 2{,}1$~s. Los 14
+segmentos de la prueba con pérdidas (el del largo y 13 de datos) suman unos 30~s, y con el
+handshake y el cierre el total ronda los 38~s, cerca del promedio de 40~s medido
+(sección~\ref{sec:pruebas-perdidas}). Con 2~s, el doble del RTT, queda margen para el tiempo de
+proceso sin alargar demasiado cada recuperación.
 
-\code{send} envía primero un segmento con \field{message\_length} en 4 bytes, con el último
-\field{seq} almacenado, y luego el mensaje en trozos de a lo más 16 bytes. Reenvía cada segmento
-tras cada timeout hasta recibir el \flag{ACK} con el \field{seq} siguiente, y descarta lo demás
-sin reiniciar el plazo. El receptor confirma cada segmento que llega en orden. Si llega uno con
-\field{seq} menor al esperado, es un duplicado cuyo \flag{ACK} se perdió: lo descarta y reenvía
-el \flag{ACK}.
+Decisiones de diseño de \code{send}:
+\begin{itemize}
+	\item Envía primero un segmento con \field{message\_length} en 4 bytes, con el último
+	\field{seq} almacenado, y luego el mensaje en trozos de a lo más 16 bytes. Con 4 bytes un
+	mensaje puede medir hasta unos 4~GB. No retorna hasta que se confirma el último trozo.
+	\item Solo reenvía cuando vence el timeout. Lo que llegue mientras espera y no sea el
+	\flag{ACK} esperado, como un \flag{ACK} repetido o un \flag{SYN+ACK} reenviado, se descarta sin
+	reenviar. Una primera versión reenviaba ante cualquier segmento inesperado, y eso multiplica los
+	duplicados: el receptor confirma cada duplicado, ese \flag{ACK} repetido llega mientras el
+	emisor espera el del segmento siguiente y provoca otro reenvío, y así con cada segmento que
+	sigue. Basta un duplicado, por ejemplo por un timeout prematuro, para que desde ahí cada
+	segmento viaje dos veces. Es el problema que en TFTP se conoce como Sorcerer's Apprentice
+	(RFC 1123).
+	\item El plazo no se reinicia al descartar un segmento: al enviar se calcula una hora límite y
+	cada lectura espera solo lo que falta. Si se reiniciara, una contraparte que reenvía algo cada
+	timeout, como el \flag{SYN+ACK} de \code{accept}, podría postergar el reenvío indefinidamente.
+	\item La espera con reenvío está en un solo método, \code{\_send\_and\_wait}, que también usan
+	\code{close} y \code{recv\_close} con un máximo de 3 timeouts. En \code{send} no hay máximo,
+	porque rendirse dejaría el mensaje incompleto.
+\end{itemize}
 
 Decisiones de diseño de \code{recv}:
 \begin{itemize}
@@ -158,10 +217,25 @@ Decisiones de diseño de \code{recv}:
 	guardados, \code{recv} espera el segmento con \field{message\_length} de un mensaje nuevo; si
 	no, sigue recibiendo datos del actual.
 	\item Retorna apenas junta \code{min(message\_length, buff\_size)} bytes, o lo que quede del
-	mensaje en curso si es menos. Nunca mezcla dos mensajes.
+	mensaje en curso si es menos. Nunca mezcla dos mensajes: la condición del enunciado se refiere
+	a un solo mensaje, y esperar el siguiente para completar \field{buff\_size} podría bloquear.
+	En el Test 3, por ejemplo, la segunda llamada a \code{recv(14)} retorna los 5 bytes que quedan.
+	Si esperara 9 bytes más de otro mensaje, quedaría bloqueada, porque el cliente ya no envía
+	nada.
 	\item Como los segmentos traen 16 bytes, puede juntar más de \field{buff\_size} (32 bytes con
 	\code{recv(21)}, por ejemplo). Retorna exactamente \field{buff\_size} y guarda el excedente en
 	\field{pending\_buffer}, que la siguiente llamada entrega primero, así que no se pierden datos.
+	El excedente no puede quedar en el socket, porque un datagrama UDP se lee completo y lo que no
+	cabe en el buffer de \code{recvfrom} se descarta. Tampoco se puede volver a pedir, porque el
+	segmento ya se confirmó y el emisor pasó al siguiente. Otra opción sería confirmar un segmento
+	solo cuando se entregan todos sus bytes, pero el emisor lo reenviaría sin necesidad hasta la
+	siguiente llamada a \code{recv}.
+	\item El receptor nunca reenvía por su cuenta. Si se pierde un \flag{ACK}, el emisor reenvía el
+	segmento, y \code{recv} lo reconoce como duplicado porque su \field{seq} es menor que
+	\field{expected\_seq}: lo descarta sin entregar los datos dos veces y vuelve a enviar el
+	\flag{ACK}. Por eso, cuando vence el timeout dentro de \code{recv}, simplemente sigue esperando,
+	como el \code{recv} bloqueante de un socket TCP. Un segmento con \field{seq} mayor al esperado
+	no puede ocurrir con Stop \& Wait, y se ignora.
 	\item \field{buff\_size} solo afecta a \code{SocketTCP}: el socket UDP siempre lee con su
 	buffer fijo de 21 bytes.
 \end{itemize}
@@ -170,22 +244,29 @@ Decisiones de diseño de \code{recv}:
 El cierre usa el mismo contador que el handshake. Si s es el \field{seq} tras el último
 \code{send}, \code{close} (Host A) envía \flag{FIN} con s, \code{recv\_close} (Host B) responde
 \flag{FIN+ACK} con s+1 y Host A termina con \flag{ACK} s+2. Host B confirma el \flag{FIN} y envía
-el suyo en un mismo segmento, porque ya no le queda nada por enviar.
+el suyo en un mismo segmento, porque ya no le queda nada por enviar. TCP usa cuatro segmentos
+porque B puede seguir enviando datos después de recibir el \flag{FIN} de A. Aquí
+\code{recv\_close} solo se llama cuando B terminó, así que separarlos solo agregaría otro
+Stop \& Wait y otro punto donde manejar pérdidas.
 
 Ante pérdidas (paso 8), \code{close} reenvía el \flag{FIN} tras cada timeout y, si al tercero no
 llegó el \flag{FIN+ACK}, asume que la contraparte cerró. Si llega, envía el \flag{ACK} final tres
-veces, separadas por un timeout, porque nadie lo confirma. \code{recv\_close} reenvía el
-\flag{FIN+ACK} mientras espera ese \flag{ACK}, hasta 3 timeouts, y luego cierra de todas formas.
-Mientras espera el \flag{FIN} también confirma los datos duplicados: si se perdió el \flag{ACK}
-del último segmento, el \code{send} del otro lado lo sigue reenviando y nunca llega a
-\code{close}.
+veces, separadas por un timeout, porque nadie lo confirma. Por eso \code{close} demora al menos
+dos timeouts (4~s) aunque no haya pérdidas. \code{recv\_close} reenvía el \flag{FIN+ACK} mientras
+espera ese \flag{ACK}, hasta 3 timeouts, y luego cierra de todas formas. Que se pierdan los tres
+\flag{ACK} pasa un 0,8~\% de las veces con 20~\% de pérdida. Mientras espera el \flag{FIN},
+\code{recv\_close} también confirma los datos duplicados: si se perdió el \flag{ACK} del último
+segmento, el \code{send} del otro lado lo sigue reenviando y nunca llega a \code{close}.
 
 Cuando \code{recv} recibe un \flag{FIN} retorna \code{b\textquotedbl\textquotedbl{}}, como un socket TCP cuando la
-contraparte cierra, y guarda su \field{seq} para que \code{recv\_close} lo responda de inmediato.
-El \flag{FIN} solo puede llegar entre mensajes, porque \code{send} no retorna hasta que se
+contraparte cierra, y guarda su \field{seq} para que \code{recv\_close} lo responda de inmediato,
+sin esperar a que \code{close} lo reenvíe. Así el servidor tiene una condición de término: no
+sabe cuántos mensajes enviará el cliente, y cada \code{recv} solo conoce el largo del mensaje en
+curso. El \flag{FIN} solo puede llegar entre mensajes, porque \code{send} no retorna hasta que se
 confirman todos sus datos.
 
 \subsection{Manejo de pérdidas en el handshake}
+\label{sec:handshake-perdidas}
 \code{connect} reenvía el \flag{SYN} tras cada timeout hasta recibir el \flag{SYN+ACK}, y el
 socket nuevo de \code{accept} reenvía el \flag{SYN+ACK} hasta recibir el \flag{ACK}. El caso
 borde es que se pierda ese último \flag{ACK} (figura~\ref{fig:handshake-ack-perdido}):
@@ -209,6 +290,15 @@ el segmento, así que \code{recv} y \code{recv\_close} no cambian. Tampoco \code
 descarta el \flag{SYN+ACK} reenviado como cualquier segmento inesperado. La ejecución 2 de la
 sección~\ref{sec:pruebas-perdidas} muestra este caso.
 
+Había otras soluciones posibles. Una es que el cliente, ya en \code{send}, responda a un
+\flag{SYN+ACK} repetido reenviando el \flag{ACK}, lo que obliga a \code{send} y \code{recv} a
+reconocer segmentos del handshake. Otra es que \code{connect} espere un timeout más después de
+enviar el \flag{ACK}, por si llega otro \flag{SYN+ACK}. Eso agrega 2~s a toda conexión y aun así
+no da certeza, porque ese \flag{SYN+ACK} también puede perderse. La confirmación implícita no
+cuesta nada cuando no hay pérdidas y solo cambia \code{accept}. Su límite es que el cliente tiene
+que enviar primero, y la sección~\ref{sec:bordes} describe qué pasa si el primero en enviar es el
+servidor.
+
 % Fuente en img/handshake_ack_perdido.dot; el PDF se regenera con img/render.sh.
 \begin{figure}[htbp]
 	\centering
@@ -224,7 +314,20 @@ Cada mensaje empieza con [DEBUG] y va a stderr, para no mezclarse con el archivo
 timeout y el segmento que se reenvía, los duplicados que se descartan y se vuelven a confirmar,
 los segmentos inesperados que se descartan mientras se espera un \flag{ACK}, la pérdida del
 último \flag{ACK} del handshake, y cuando \code{close} o \code{recv\_close} dejan de reenviar
-tras 3 timeouts. La sección~\ref{sec:pruebas-perdidas} muestra una salida completa.
+tras 3 timeouts. La sección~\ref{sec:pruebas-perdidas} muestra una salida completa. Las pérdidas
+se indujeron con netem y no a mano, así que el código no tiene variables para fijar una tasa de
+pérdida.
+
+\subsection{Cliente y servidor}
+\code{cliente.py} lee el archivo completo desde la entrada estándar como bytes, sin decodificarlo,
+así que sirve para cualquier tipo de archivo. Lo envía con un solo \code{send}, de modo que el
+archivo es un mensaje y su \field{message\_length} es el tamaño del archivo, y luego llama a
+\code{close}. \code{servidor.py} acepta una sola conexión y llama a \code{recv} hasta que retorna
+\code{b\textquotedbl\textquotedbl{}}. Escribe cada parte en la salida estándar como bytes, porque
+un \code{recv} puede cortar un carácter de varios bytes, como una ñ en UTF-8, y decodificar cada
+parte por separado lo rompería. Al terminar llama a \code{recv\_close}. Ambos programas escriben
+sus mensajes de estado en stderr, así que la salida estándar del servidor es exactamente el
+archivo.
 
 \section{Pruebas}
 Las pruebas se corrieron en localhost, en Arch Linux (kernel 7.2.9) con Python 3.14.8, con el modo
@@ -347,6 +450,7 @@ Test 4: Passed
 \end{verbatim}}
 
 \section{Situaciones de borde no especificadas}
+\label{sec:bordes}
 \begin{itemize}
 	\item Datos del servidor al cliente con pérdidas. El enunciado y las pruebas solo envían datos
 	del cliente al servidor. En el otro sentido hay dos casos que bloquean a ambos lados. Si el
@@ -361,6 +465,13 @@ Test 4: Passed
 	\item Si se pierden los tres \flag{FIN} de \code{close} (un 0,8~\% de las veces con 20~\% de
 	pérdida), el cliente cierra pero el servidor sigue esperando en \code{recv}, porque el
 	enunciado solo acota la espera del último \flag{ACK}, no la del \flag{FIN}.
+	\item \flag{SYN} repetidos en el socket de escucha. Si se pierde el \flag{SYN+ACK}, el cliente
+	reenvía el \flag{SYN} a la dirección de escucha, porque aún no conoce la del socket nuevo. El
+	handshake igual termina, porque el socket nuevo reenvía el \flag{SYN+ACK} por su cuenta, pero
+	esos \flag{SYN} quedan sin leer en el socket de escucha. \code{servidor.py} llama a
+	\code{accept} una sola vez, así que no le afecta. Un servidor que aceptara varias conexiones
+	respondería en su siguiente \code{accept} a un \flag{SYN} viejo y quedaría reenviando el
+	\flag{SYN+ACK} a un cliente que ya está conectado, sin retornar.
 	\item Un mensaje vacío: \code{send(b\textquotedbl\textquotedbl{})} solo envía \field{message\_length} = 0 y \code{recv}
 	retorna \code{b\textquotedbl\textquotedbl{}}, lo mismo que cuando la contraparte cierra. En la entrega solo pasa con un
 	archivo vacío, y el servidor igual termina bien: sale de su ciclo y \code{recv\_close} espera
@@ -392,6 +503,7 @@ Su uso se resume a:
 	\item Explicar el uso de netem para simular pérdidas y retardo en la interfaz de loopback.
 	\item Corregir/debuggear y complementar código; y otras discusiones técnicas de programación.
 	\item Escribir los scripts de las pruebas de funcionalidad y con pérdidas, y redactar las secciones correspondientes a partir de sus salidas.
+	\item Ampliar la explicación de las decisiones de diseño a partir del código y del historial del repositorio.
 \end{itemize}
 
 Los modelos se emplearon como herramientas de consulta y explicación para comprender mejor los temas técnicos, y como apoyo en la ejecución y documentación de las pruebas.
